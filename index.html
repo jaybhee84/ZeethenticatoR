@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#111">
+<title>ZeethenticatoR</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'><rect width='108' height='108' rx='24' fill='%23111'/><path fill='%234C8DFF' d='M54,27 L76,35 L76,52 C76,68 66,78 54,83 C42,78 32,68 32,52 L32,35 Z'/><path fill='none' stroke='%23fff' stroke-width='5.5' d='M44,43 L64,43 L44,64 L64,64'/></svg>">
+<style>
+  :root { --bg:#111; --card:#1d1d1f; --fg:#eee; --dim:#888; --accent:#4c8dff; --danger:#ff5c5c; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:16px system-ui, sans-serif; max-width:520px; margin-inline:auto; }
+  h1 { font-size:20px; margin:4px 0 16px; }
+  .acct { background:var(--card); border-radius:12px; padding:14px 16px; margin-bottom:10px; display:flex; align-items:center; gap:12px; }
+  .acct .info { flex:1; min-width:0; }
+  .acct .name { color:var(--dim); font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .acct .code { font:600 32px ui-monospace, monospace; letter-spacing:2px; background:none; border:0; color:var(--fg); padding:0; cursor:pointer; }
+  .acct .left { color:var(--dim); font-size:13px; width:28px; text-align:right; }
+  button, input, textarea { font:inherit; }
+  .btn { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:12px 16px; cursor:pointer; }
+  .btn.ghost { background:var(--card); color:var(--fg); }
+  .del { background:none; border:0; color:var(--danger); font-size:20px; cursor:pointer; padding:4px 8px; }
+  details { background:var(--card); border-radius:12px; padding:12px 16px; margin-top:16px; }
+  summary { cursor:pointer; font-weight:600; }
+  label { display:block; margin-top:12px; font-size:14px; color:var(--dim); }
+  input, textarea { width:100%; margin-top:4px; padding:10px; border-radius:8px; border:1px solid #333; background:#000; color:var(--fg); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  #msg { color:var(--dim); font-size:14px; min-height:20px; margin-top:8px; }
+  .empty { color:var(--dim); text-align:center; padding:32px 0; }
+</style>
+</head>
+<body>
+<h1>ZeethenticatoR</h1>
+<div id="list"></div>
+
+<details id="add" open>
+  <summary>Add account</summary>
+  <label>Name <input id="name" placeholder="e.g. Google, Discord, GitHub" autocomplete="off"></label>
+  <label>Setup key (or otpauth:// link) <input id="secret" placeholder="JBSW Y3DP EHPK 3PXP" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+  <div class="row">
+    <button class="btn" id="save">Add</button>
+    <label class="btn ghost" id="scanLabel" hidden style="margin:0;color:var(--fg)">Scan QR
+      <input type="file" id="scan" accept="image/*" capture="environment" hidden>
+    </label>
+  </div>
+  <div id="msg" role="status"></div>
+</details>
+
+<details>
+  <summary>Backup / restore</summary>
+  <p style="color:var(--dim);font-size:14px">Your keys live only in this browser. If you clear site data, they're gone. Copy the backup and keep it somewhere safe and private.</p>
+  <div class="row"><button class="btn ghost" id="export">Copy backup</button></div>
+  <label>Restore (paste backup, one otpauth:// per line) <textarea id="importText" rows="4"></textarea></label>
+  <div class="row"><button class="btn ghost" id="import">Restore</button></div>
+</details>
+
+<script>
+const KEY = 'totp-accounts';
+const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } };
+// Writes first, then updates memory: if storage fails, the UI never shows unsaved accounts.
+const store = a => { localStorage.setItem(KEY, JSON.stringify(a)); accounts = a; };
+let accounts = load();
+
+function base32(s) {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  s = s.toUpperCase().replace(/[\s=-]/g, '');
+  let bits = 0, val = 0; const out = [];
+  for (const c of s) {
+    const i = A.indexOf(c);
+    if (i < 0) throw new Error('Invalid character in key: ' + c);
+    val = (val << 5) | i; bits += 5;
+    if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  if (!out.length) throw new Error('Key is empty');
+  return new Uint8Array(out);
+}
+
+async function totp(keyBytes, ms = Date.now(), digits = 6, period = 30, algo = 'SHA-1') {
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: algo }, false, ['sign']);
+  const msg = new ArrayBuffer(8);
+  new DataView(msg).setBigUint64(0, BigInt(Math.floor(ms / 1000 / period)));
+  const h = new Uint8Array(await crypto.subtle.sign('HMAC', key, msg));
+  const o = h[h.length - 1] & 15;
+  const n = (((h[o] & 127) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3]) % 10 ** digits;
+  return String(n).padStart(digits, '0');
+}
+
+// Accepts a raw base32 key or an otpauth://totp/... link; throws on bad input.
+function parse(input, name) {
+  input = input.trim();
+  if (input.startsWith('otpauth://')) {
+    const u = new URL(input);
+    if (u.host !== 'totp') throw new Error('Only TOTP links are supported');
+    const p = u.searchParams;
+    const label = decodeURIComponent(u.pathname.slice(1));
+    const acct = {
+      name: name || (p.get('issuer') && !label.startsWith(p.get('issuer')) ? p.get('issuer') + ': ' + label : label) || 'Account',
+      secret: (p.get('secret') || '').toUpperCase().replace(/[\s=]/g, ''),
+      digits: +p.get('digits') || 6,
+      period: +p.get('period') || 30,
+      algo: { SHA256: 'SHA-256', SHA512: 'SHA-512' }[(p.get('algorithm') || '').toUpperCase()] || 'SHA-1',
+    };
+    if (![6, 7, 8].includes(acct.digits)) throw new Error('Unsupported digits: ' + acct.digits);
+    if (!Number.isInteger(acct.period) || acct.period < 1) throw new Error('Invalid period: ' + p.get('period'));
+    base32(acct.secret);
+    return acct;
+  }
+  const secret = input.toUpperCase().replace(/[\s=-]/g, '');
+  base32(secret);
+  return { name: name || 'Account', secret, digits: 6, period: 30, algo: 'SHA-1' };
+}
+
+const uri = a => `otpauth://totp/${encodeURIComponent(a.name)}?secret=${a.secret}&digits=${a.digits}&period=${a.period}&algorithm=${a.algo.replace('-', '')}`;
+// In the Android app, copy goes through the native bridge (WebView has no clipboard API).
+const copy = t => window.Android ? (Android.copy(t), Promise.resolve()) : navigator.clipboard.writeText(t);
+const msg = t => document.getElementById('msg').textContent = t;
+
+function render() {
+  const list = document.getElementById('list');
+  list.innerHTML = accounts.length ? '' : '<div class="empty">No accounts yet. Add one below.</div>';
+  accounts.forEach((a, i) => {
+    const el = document.createElement('div');
+    el.className = 'acct';
+    el.innerHTML = `<div class="info"><div class="name"></div><button class="code" aria-label="Copy code">------</button></div><span class="left"></span><button class="del" aria-label="Delete">✕</button>`;
+    el.querySelector('.name').textContent = a.name;
+    el.querySelector('.code').onclick = e => copy(e.target.textContent.replace(/\s/g, '')).then(() => msg('Code copied'));
+    el.querySelector('.del').onclick = () => {
+      if (!confirm(`Delete "${a.name}"? Make sure 2FA is turned off or you have recovery codes first.`)) return;
+      try { store(accounts.filter((_, j) => j !== i)); } catch (e) { alert('Could not save: ' + e.message); } render();
+    };
+    list.appendChild(el);
+  });
+  document.getElementById('add').open = !accounts.length || document.getElementById('add').open;
+  tick();
+}
+
+async function tick() {
+  const now = Date.now();
+  const els = document.querySelectorAll('.acct');
+  await Promise.all(accounts.map(async (a, i) => {
+    if (!els[i]) return;
+    const c = await totp(base32(a.secret), now, a.digits, a.period, a.algo);
+    els[i].querySelector('.code').textContent = c.length === 6 ? c.slice(0, 3) + ' ' + c.slice(3) : c;
+    els[i].querySelector('.left').textContent = a.period - Math.floor(now / 1000) % a.period + 's';
+  }));
+}
+
+function add(acct) { store([...accounts, acct]); render(); }
+
+document.getElementById('save').onclick = () => {
+  try {
+    add(parse(document.getElementById('secret').value, document.getElementById('name').value.trim()));
+    document.getElementById('secret').value = document.getElementById('name').value = '';
+    msg('Added');
+  } catch (e) { msg(e.message); }
+};
+
+// Native QR decoding (Android Chrome). Hidden where unsupported, e.g. iPhone Safari: type the setup key instead.
+if ('BarcodeDetector' in window && !window.Android) {
+  document.getElementById('scanLabel').hidden = false;
+  document.getElementById('scan').onchange = async e => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    try {
+      const codes = await new BarcodeDetector({ formats: ['qr_code'] }).detect(await createImageBitmap(f));
+      if (!codes.length) return msg('No QR code found. Try again closer.');
+      add(parse(codes[0].rawValue, document.getElementById('name').value.trim()));
+      msg('Added from QR');
+    } catch (err) { msg(err.message); }
+  };
+}
+
+document.getElementById('export').onclick = () =>
+  copy(accounts.map(uri).join('\n')).then(() => alert('Backup copied. Paste it somewhere private (e.g. a password manager).'));
+
+document.getElementById('import').onclick = () => {
+  const lines = document.getElementById('importText').value.split('\n').filter(l => l.trim());
+  try {
+    const parsed = lines.map(l => parse(l)).filter(n => !accounts.some(a => a.secret === n.secret));
+    store([...accounts, ...parsed]); render();
+    document.getElementById('importText').value = '';
+    alert(`Restored ${parsed.length} account(s)` + (parsed.length < lines.length ? `, skipped ${lines.length - parsed.length} already here` : ''));
+  } catch (e) { alert('Restore failed: ' + e.message); }
+};
+
+// Self-check against RFC 6238 test vector: if this fails, codes are wrong.
+totp(new TextEncoder().encode('12345678901234567890'), 59000, 8).then(c => {
+  if (c !== '94287082') throw new Error('wrong test code');
+}).catch(e => { document.body.innerHTML = '<p>Self-check failed, codes would be wrong here (' + e.message + '). Open this page over https.</p>'; });
+
+render();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

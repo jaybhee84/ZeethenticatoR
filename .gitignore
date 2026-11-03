@@ -1,0 +1,10 @@
+# Signing key: never commit. Back it up; without it you can't publish updates that install over the old app.
+release.jks
+release-password.txt
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/assets/
+.idea/
+*.iml
