@@ -11,6 +11,7 @@
 <style>
   :root { --bg:#111; --card:#1d1d1f; --fg:#eee; --dim:#888; --accent:#4c8dff; --danger:#ff5c5c; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:16px system-ui, sans-serif; max-width:520px; margin-inline:auto; }
   h1 { font-size:20px; margin:4px 0 16px; }
   .acct { background:var(--card); border-radius:12px; padding:14px 16px; margin-bottom:10px; display:flex; align-items:center; gap:12px; }
@@ -147,7 +148,11 @@ async function tick() {
   }));
 }
 
-function add(acct) { store([...accounts, acct]); render(); }
+function add(acct) {
+  const dup = accounts.find(a => a.secret === acct.secret);
+  if (dup) throw new Error(`Already added as "${dup.name}"`);
+  store([...accounts, acct]); render();
+}
 
 document.getElementById('save').onclick = () => {
   try {
@@ -157,17 +162,31 @@ document.getElementById('save').onclick = () => {
   } catch (e) { msg(e.message); }
 };
 
-// Native QR decoding (Android Chrome). Hidden where unsupported, e.g. iPhone Safari: type the setup key instead.
-if ('BarcodeDetector' in window && !window.Android) {
-  document.getElementById('scanLabel').hidden = false;
+// Called with the QR text, by the Android app's native scanner or the browser path below.
+function onScan(raw) {
+  // 2FA QR codes always hold an otpauth:// link; plain text like "HELLO" would otherwise pass as a key.
+  if (!String(raw).trim().startsWith('otpauth://')) return msg('That QR code is not a 2FA setup code.');
+  try {
+    add(parse(raw, document.getElementById('name').value.trim()));
+    document.getElementById('name').value = '';
+    msg('Added from QR');
+  } catch (err) { msg(err.message); }
+}
+
+const scanLabel = document.getElementById('scanLabel');
+if (window.Android) {
+  scanLabel.hidden = false;
+  scanLabel.onclick = e => { e.preventDefault(); Android.scan(); };
+} else if ('BarcodeDetector' in window) {
+  // Browser QR decoding (Android Chrome). Hidden where unsupported, e.g. iPhone Safari: type the setup key instead.
+  scanLabel.hidden = false;
   document.getElementById('scan').onchange = async e => {
     const f = e.target.files[0]; e.target.value = '';
     if (!f) return;
     try {
       const codes = await new BarcodeDetector({ formats: ['qr_code'] }).detect(await createImageBitmap(f));
       if (!codes.length) return msg('No QR code found. Try again closer.');
-      add(parse(codes[0].rawValue, document.getElementById('name').value.trim()));
-      msg('Added from QR');
+      onScan(codes[0].rawValue);
     } catch (err) { msg(err.message); }
   };
 }

@@ -15,6 +15,10 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import androidx.webkit.WebViewAssetLoader;
+import com.google.mlkit.vision.barcode.common.Barcode;
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions;
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning;
+import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private WebView web;
@@ -50,6 +54,17 @@ public class MainActivity extends Activity {
                     clip.getDescription().setExtras(extras);
                 }
                 ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(clip);
+            }
+
+            // Google's scanner runs in Play services: no camera permission or internet needed in this app.
+            @JavascriptInterface
+            public void scan() {
+                GmsBarcodeScannerOptions qrOnly = new GmsBarcodeScannerOptions.Builder()
+                        .setBarcodeFormats(Barcode.FORMAT_QR_CODE).build();
+                runOnUiThread(() -> GmsBarcodeScanning.getClient(MainActivity.this, qrOnly).startScan()
+                        .addOnSuccessListener(b -> web.evaluateJavascript("onScan(" + JSONObject.quote(b.getRawValue()) + ")", null))
+                        .addOnFailureListener(e -> web.evaluateJavascript(
+                                "msg(" + JSONObject.quote("Scanner unavailable: " + e.getMessage()) + ")", null)));
             }
         }, "Android");
         web.loadUrl("https://appassets.androidplatform.net/assets/index.html");
